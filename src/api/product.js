@@ -49,3 +49,25 @@ export function createProductAPI(data) {
     data,
   })
 }
+
+/**
+ * 商户端 - 新增商品
+ */
+export function deleteProductAPI(data) {
+  return request({
+    url: '/api/v1/merchant/products',
+    method: 'POST',
+    data,
+  })
+}
+
+/**
+ * 商户端 - 新增商品
+ */
+export function updateProductAPI(data) {
+  return request({
+    url: '/api/v1/merchant/products',
+    method: 'POST',
+    data,
+  })
+}
