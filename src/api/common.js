@@ -20,3 +20,9 @@ export function reportLocationAPI(data) {
     },
   })
 }
+export function getAllergensAPI() {
+  return uni.request({
+    url: '/api/v1/common/allergens',
+    method: 'GET',
+  })
+}
