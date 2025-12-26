@@ -2,6 +2,7 @@
 import { onShow } from '@dcloudio/uni-app'
 import { ref, watch } from 'vue'
 
+// 1. 移除 getAllergensAPI，只保留商品相关 API
 import {
   createProductAPI,
   deleteProductAPI,
@@ -14,6 +15,8 @@ import { useUserStore } from '@/store/user'
 const userStore = useUserStore()
 const categoryOptions = ['食品', '纪念品', '酒水']
 
+// 移除 allergenOptions 相关变量
+
 const goods = ref([])
 const isLoading = ref(false)
 const searchKey = ref('')
@@ -23,6 +26,7 @@ const total = ref(0)
 
 const isPopupOpen = ref(false)
 const isEditMode = ref(false)
+
 const formData = ref({
   id: '',
   name: '',
@@ -31,6 +35,8 @@ const formData = ref({
   classify: '',
   info: '',
   img: '',
+  // 2. 修改：使用 ingredientInput 来绑定输入框字符串
+  ingredientInput: '',
 })
 
 function initForm() {
@@ -42,12 +48,20 @@ function initForm() {
     classify: '',
     info: '',
     img: '',
+    ingredientInput: '', // 重置为空字符串
   }
 }
 
 onShow(() => {
+  if (!userStore.token) {
+    return
+  }
   handleSearch()
+  // 移除 fetchAllergens()
 })
+
+// 移除 fetchAllergens 函数
+// 移除 toggleAllergen 函数
 
 let searchTimer = null
 watch(searchKey, (newVal) => {
@@ -97,6 +111,11 @@ function openAddPopup() {
 
 function openEditPopup(item) {
   isEditMode.value = true
+
+  // 3. 回显逻辑：将数组转为字符串 (用空格连接)
+  // 例如 ['面粉', '鸡蛋'] -> "面粉 鸡蛋"
+  const ingredientsStr = (item.allergens || []).join(' ')
+
   formData.value = {
     id: item.product_id,
     name: item.product_name,
@@ -105,6 +124,7 @@ function openEditPopup(item) {
     price: item.price,
     img: item.image_url,
     count: item.stock,
+    ingredientInput: ingredientsStr, // 赋值给输入框
   }
   isPopupOpen.value = true
 }
@@ -130,14 +150,21 @@ async function handleSave() {
   if (!form.classify)
     return uni.showToast({ title: '请选择分类', icon: 'none' })
 
+  // 4. 保存逻辑：将字符串转回数组
+  // 使用正则分割：支持空格、中文逗号、英文逗号
+  const allergensArray = form.ingredientInput
+    ? form.ingredientInput.split(/[,，\s]+/).filter(item => item.trim() !== '')
+    : []
+
   try {
     const payload = {
-      name: form.name,
+      product_name: form.name,
       price: String(form.price),
       stock: Number(form.count),
       desc: form.info || '',
       category: form.classify,
       image_url: form.img || '',
+      allergens: allergensArray, // 传给后端的是数组
     }
 
     if (isEditMode.value) {
@@ -279,14 +306,21 @@ function loadMore() {
                   <span class="text-xs font-bold align-top">¥</span>{{ item.price }}
                 </view>
               </view>
+
               <view class="flex flex-wrap gap-2 mt-2">
                 <span v-if="item.category" class="bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-[10px] font-bold border border-orange-100">{{ item.category }}</span>
+                <span
+                  v-for="(alg, idx) in item.allergens"
+                  :key="idx"
+                  class="bg-blue-50 text-blue-500 px-2 py-0.5 rounded text-[10px] font-bold border border-blue-100 flex items-center gap-1"
+                >
+                  🧬 {{ alg }}
+                </span>
                 <span class="bg-gray-100 text-gray-500 px-2 py-0.5 rounded text-[10px] font-bold">库存: {{ item.stock }}</span>
-                <span class="bg-blue-50 text-blue-500 px-2 py-0.5 rounded text-[10px] font-bold">已售: {{ item.sold }}</span>
               </view>
             </view>
             <view class="flex justify-end gap-2 mt-3">
-              <button class="bg-gray-100 hover:bg-gray-200 text-gray-600 text-[10px] px-3 py-1.5  flex items-center gap-1 border-0 transition-colors" @click.stop="openEditPopup(item)">
+              <button class="bg-gray-100 hover:bg-gray-200 text-gray-600 text-[10px] px-3 py-1.5 flex items-center gap-1 border-0 transition-colors" @click.stop="openEditPopup(item)">
                 📝 编辑
               </button>
               <button class="bg-red-50 hover:bg-red-100 text-red-500 text-[10px] px-3 py-1.5 flex items-center gap-1 border-0 transition-colors" @click.stop="handleDelete(item.product_id)">
@@ -308,7 +342,7 @@ function loadMore() {
     <view v-if="isPopupOpen" class="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <view class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" @click="closePopup"></view>
 
-      <view class="bg-white w-full max-w-sm h-[80vh] rounded-3xl shadow-2xl flex flex-col relative z-[101] overflow-hidden animate-pop-in">
+      <view class="bg-white w-full max-w-sm h-[85vh] rounded-3xl shadow-2xl flex flex-col relative z-[101] overflow-hidden animate-pop-in">
         <view :class="isEditMode ? 'bg-slate-800' : 'bg-indigo-600'" class="p-4 pt-5 pb-8 flex justify-between items-center text-white relative transition-colors duration-300 flex-none z-10">
           <h3 class="font-bold text-xl">
             {{ isEditMode ? '编辑商品' : '录入新商品' }}
@@ -318,11 +352,7 @@ function loadMore() {
           </view>
         </view>
 
-        <scroll-view
-          scroll-y
-          class="flex-1 h-0 w-full bg-white -mt-4 rounded-t-3xl relative z-20"
-          :enable-flex="true"
-        >
+        <scroll-view scroll-y class="flex-1 h-0 w-full bg-white -mt-4 rounded-t-3xl relative z-20" :enable-flex="true">
           <view class="px-5 pt-6 pb-5">
             <view class="flex justify-center mb-4">
               <view v-if="formData.img" class="relative w-28 h-28 rounded-2xl overflow-hidden border-2 border-indigo-100 shadow-md">
@@ -382,6 +412,18 @@ function loadMore() {
 
               <view>
                 <text class="text-xs text-gray-500 font-bold ml-1">
+                  商品成分 (多个成分请用空格分隔)
+                </text>
+                <input
+                  v-model="formData.ingredientInput"
+                  class="modern-input"
+                  placeholder="例如：面粉 鸡蛋 牛奶"
+                  :cursor-spacing="20"
+                />
+              </view>
+
+              <view>
+                <text class="text-xs text-gray-500 font-bold ml-1">
                   商品描述
                 </text>
                 <textarea v-model="formData.info" :cursor-spacing="50" class="modern-input h-20 py-2" placeholder="输入详情..." />
@@ -412,23 +454,21 @@ function loadMore() {
 </template>
 
 <style scoped>
-/* 替换 input 默认样式，减小 padding 适应手机屏 */
 .modern-input {
   width: 100%;
-  background-color: #f3f4f6; /* bg-gray-100 */
-  color: #1f2937; /* text-gray-800 */
-  font-size: 0.875rem; /* text-sm */
-  font-weight: 700; /* font-bold */
-  border-radius: 0.75rem; /* rounded-xl */
-  padding: 0.6rem 0.8rem; /* 调整为更适合的高度 */
+  background-color: #f3f4f6;
+  color: #1f2937;
+  font-size: 0.875rem;
+  font-weight: 700;
+  border-radius: 0.75rem;
+  padding: 0.6rem 0.8rem;
   border: 2px solid transparent;
   margin-top: 0.25rem;
   transition: all 0.2s;
-  box-sizing: border-box; /* 关键 */
-  height: 46px; /* 显式高度 */
+  box-sizing: border-box;
+  height: 46px;
 }
 
-/* textarea 特殊处理 */
 textarea.modern-input {
   height: 80px;
   line-height: 1.4;
@@ -437,7 +477,7 @@ textarea.modern-input {
 .modern-input:focus-within,
 .modern-input:focus {
   background-color: #ffffff;
-  border-color: #c7d2fe; /* border-indigo-200 */
+  border-color: #c7d2fe;
 }
 
 @keyframes pop-in {
@@ -450,11 +490,9 @@ textarea.modern-input {
     opacity: 1;
   }
 }
-
 .animate-pop-in {
   animation: pop-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
-
 ::-webkit-scrollbar {
   display: none;
   width: 0;
