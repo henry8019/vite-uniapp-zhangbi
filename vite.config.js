@@ -5,6 +5,7 @@ import plugins from './vite.config.plugins.js'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd())
+  const targetUrl = env.VITE_API_TARGET_URL || 'http://221.180.19.170:35004'
 
   return {
     base: './',
@@ -13,11 +14,16 @@ export default defineConfig(({ mode }) => {
       port: 1045,
       cors: true,
       proxy: {
+        '/socket.io': {
+          target: targetUrl,
+          changeOrigin: true,
+          ws: true,
+          rewrite: path => path,
+        },
         '/api': {
-          target: env.VITE_API_TARGET_URL,
+          target: targetUrl,
           changeOrigin: true,
           secure: false,
-
           rewrite: path => path,
         },
       },
