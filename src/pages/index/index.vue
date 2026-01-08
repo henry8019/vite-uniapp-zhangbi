@@ -1,9 +1,10 @@
 <script setup>
 import { onPullDownRefresh, onReachBottom, onShow } from '@dcloudio/uni-app'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { getTeamListAPI } from '@/api/team'
 import CustomTabBar from '@/components/CustomTabBar/index.vue'
 import { useGameStore } from '@/store/game'
+import { useMerchantStore } from '@/store/merchant'
 import { useUserStore } from '@/store/user'
 
 const gameStore = useGameStore()
@@ -18,11 +19,21 @@ const total = ref(0)
 const isLoading = ref(false)
 const isRefreshing = ref(false)
 
-// Dashboard 模拟数据
-const flowList = ref([
-  { id: 1, teamName: '飞虎队', peopleCount: 5, taskName: '寻找钥匙', arrivalTime: 3, tags: [{ label: '⚠️ 过敏', type: 'warning' }] },
-  { id: 2, teamName: '探险队', peopleCount: 3, taskName: '购买补给', arrivalTime: 12, tags: [] },
-])
+// 商户状态
+const merchantStore = useMerchantStore()
+
+// Dashboard 数据 - 从 API 获取流量预报数据
+const flowList = computed(() => {
+  const infos = merchantStore.gameScriptInfos || []
+  return infos.map((item, index) => ({
+    id: index,
+    script_name: item.script_name,
+    team_name: item.team_info?.team_name || '未知队伍',
+    arrivalTime: 5 + index * 3, // 模拟到达时间
+    peopleCount: 5, // 固定人数
+    tags: [],
+  }))
+})
 
 const scriptOptions = [
   { id: 'script_001', name: '粮仓奇遇记', desc: '在王记粮仓寻找消失的钥匙' },
@@ -58,13 +69,25 @@ watch(() => gameStore.socket, (newSocket) => {
   }
 }, { immediate: true })
 
-onShow(() => {
-  const token = uni.getStorageSync('token')
-  if (token)
-    gameStore.initSocket(token)
+onShow(async () => {
+  const token = uni.getStorageSync('token') // 确保拿到token
+  if (token) {
+    gameStore.initSocket(token) // 👈 记得传 token
+  }
   if (currentView.value === 'teams')
     fetchTeamList(true, true)
+  if (currentView.value === 'dashboard')
+    await merchantStore.getAllGameScriptInfos()
 })
+
+onUnmounted(() => {
+  if (gameStore.socket) {
+    gameStore.socket.off('game:game_created')
+    gameStore.socket.off('game_started')
+  }
+})
+
+// --- 🟢 核心修复 2：业务方法 ---
 
 // --- 🟢 核心逻辑：导游任务管理 ---
 
@@ -285,10 +308,88 @@ function getStatusConfig(status) {
 
     <view class="p-4 space-y-4">
       <template v-if="currentView === 'dashboard'">
-        <view class="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 shadow-lg text-white">
-          <text class="text-xl font-bold">
-            📍 王记粮仓 (#042)
-          </text>
+        <view class="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 shadow-lg text-white relative overflow-hidden animate-fade-in">
+          <view class="absolute -right-6 -top-6 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl"></view>
+          <view class="relative z-10 flex justify-between items-start">
+            <view>
+              <view class="flex items-center gap-2 mb-1">
+                <text class="text-xl font-bold">
+                  醋坊
+                </text>
+              </view>
+              <text class="opacity-90 text-sm">
+                AI流量分发开启
+              </text>
+            </view>
+          </view>
+        </view>
+
+        <view class="grid grid-cols-2 gap-3 animate-fade-in">
+          <view class="bg-white rounded-xl p-4 shadow-sm flex flex-col justify-between">
+            <text class="text-gray-500 text-xs mb-2">
+              👥 当前排队
+            </text>
+            <view class="flex items-baseline gap-1">
+              <text class="text-3xl font-black text-gray-900">
+                5
+              </text>
+              <text class="text-gray-400 text-sm">
+                / 20人
+              </text>
+            </view>
+            <view class="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden mt-2">
+              <view class="bg-green-500 h-full rounded-full" style="width: 25%"></view>
+            </view>
+          </view>
+          <view class="bg-white rounded-xl p-4 shadow-sm flex flex-col justify-between">
+            <text class="text-gray-500 text-xs mb-2">
+              🕒 预计客流
+            </text>
+            <view class="flex items-baseline gap-1">
+              <text class="text-3xl font-black text-indigo-600">
+                17
+              </text>
+              <text class="text-gray-400 text-sm">
+                人
+              </text>
+            </view>
+            <view class="bg-red-50 text-red-500 text-[10px] px-2 py-0.5 rounded w-max mt-2">
+              ⚠️ 含特殊需求
+            </view>
+          </view>
+        </view>
+
+        <view class="bg-white rounded-2xl p-4 shadow-sm min-h-[300px] animate-fade-in">
+          <view class="flex justify-between items-center mb-4">
+            <text class="font-bold text-gray-800 text-lg">
+              流量预报
+            </text>
+            <view class="bg-blue-100 text-blue-600 text-xs px-2 py-0.5 rounded-full font-medium">
+              ● 实时
+            </view>
+          </view>
+          <view class="space-y-4">
+            <view v-for="item in flowList" :key="item.id" class="flex items-center gap-3 pb-3 border-b border-gray-50 last:border-0 last:pb-0">
+              <view class="w-12 h-12 rounded-full flex items-center justify-center font-bold text-sm">
+                5m
+              </view>
+              <view class="flex-1">
+                <view class="flex items-baseline gap-2">
+                  <text class="font-bold text-gray-900 text-base">
+                    {{ item.team_name }}
+                  </text>
+                  <text class="text-gray-400 text-sm">
+                    {{ item.script_name }}
+                  </text>
+                </view>
+                <view v-if="item.tags" class="mt-1.5 flex gap-1">
+                  <view v-for="(tag, tagIdx) in item.tags" :key="tagIdx" class="text-[10px] px-1.5 py-0.5 rounded border" :class="getTagColor(tag.type)">
+                    {{ tag.label }}
+                  </view>
+                </view>
+              </view>
+            </view>
+          </view>
         </view>
       </template>
 

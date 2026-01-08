@@ -21,8 +21,9 @@ const isCreating = ref(false)
 const newTeamName = ref('')
 
 onShow(() => {
-  handleReportLocation()
-  if (isLogin.value) {
+  // 只有导游身份才上报位置和获取队伍列表
+  if (isLogin.value && userStore.role === 'guide') {
+    handleReportLocation()
     fetchTeamList()
   }
 })
