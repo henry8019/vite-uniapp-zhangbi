@@ -108,6 +108,7 @@
     "useGameStore": true,
     "useGoodsStore": true,
     "useId": true,
+    "useMerchantStore": true,
     "useModel": true,
     "useRoute": true,
     "useRouter": true,
@@ -118,7 +119,6 @@
     "watch": true,
     "watchEffect": true,
     "watchPostEffect": true,
-    "watchSyncEffect": true,
-    "useMerchantStore": true
+    "watchSyncEffect": true
   }
 }

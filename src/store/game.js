@@ -1,334 +1,190 @@
-/* eslint-disable no-use-before-define */
-/* eslint-disable prefer-promise-reject-errors */
 import { defineStore } from 'pinia'
-import { io } from 'socket.io-client'
 
 export const useGameStore = defineStore('game', {
   state: () => ({
-    socket: null,
-    isWsConnected: false,
+    gameId: '',
+    currentTeamId: '',
 
-    // --- 基础信息 ---
-    currentTeamId: null,
-    gameId: null,
-    roomStates: {},
+    // 🟢 核心任务数据
+    currentTask: null, // 任务对象 (用于显示标题/详情)
+    currentTaskId: '', // 任务 ID (用于状态比对)
+    isCurrentTaskComplete: false, // 状态标记 (true=显示灰底等待, false=显示绿底操作)
 
-    // --- 游戏运行时的核心状态 ---
-    isGameStarted: false,
-    role: '',
-    currentTask: null, // 当前大任务详情
-    currentTaskId: '',
+    // 🟢 辅助映射
+    teamGameMap: {}, // TeamID -> GameID 映射 (用于 Socket 发包)
+    roomStates: {}, // 房间状态 (在线人数等)
 
-    // 🆕 新增：任务进度与交互状态
-    completedMechanisms: {}, // 记录已完成的机制 (如: {taskId: {subTaskId: {gps: true}}})
-    completedSubtasks: {}, // 记录已完成的子任务 (如: {taskId: ['sub_1', 'sub_2']})
-    uploadStatus: 'idle', // 图片上传状态: idle | verifying | success | fail
+    // 🟢 进度记录 (用于 Force Submit 时的兜底判断，可选)
+    completedMechanisms: {},
+    completedSubtasks: {},
   }),
 
+  getters: {
+    // 简化的进度展示，仅用于 UI 显示 "1/3" 这种文本
+    taskProgress: (state) => {
+      const task = state.currentTask
+      if (!task)
+        return '加载中...'
+
+      if (task.having_sub_tasks) {
+        const finishedCount = state.completedSubtasks[task.task_id]?.length || 0
+        return `${finishedCount} / ${task.sub_tasks.length}`
+      }
+      return '进行中'
+    },
+  },
+
   actions: {
-    // 🟢 修改：接收 token 用于认证
-    initSocket(token) {
-      if (this.socket?.connected)
+    // ==========================================
+    // 1. 基础 ID 映射管理
+    // ==========================================
+    setTeamGameMapping(teamId, gameId) {
+      if (!teamId || !gameId)
         return
+      console.log(`🔗 [Store] 强制建立映射: Team[${teamId}] <-> Game[${gameId}]`)
 
-      // TODO: 替换为你的真实后端地址
-      const url = '/'
+      this.teamGameMap[teamId] = gameId
 
-      console.log('🚀 [GameStore] 开始连接 Socket, Token:', token ? '已携带' : '无')
+      // 如果正好是当前视图的队伍，同步更新 gameId
+      if (this.currentTeamId === teamId) {
+        this.gameId = gameId
+      }
+      uni.setStorageSync('TEAM_GAME_MAP', this.teamGameMap)
+    },
 
-      this.socket = io(url, {
-        path: '/socket.io',
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        // 🟢 关键：携带 Token，否则后端无法识别身份
-        auth: {
-          token,
-        },
-      })
+    getGameIdByTeam(teamId) {
+      // 优先查表，其次查当前状态
+      return this.teamGameMap[teamId] || (teamId === this.currentTeamId ? this.gameId : null)
+    },
 
-      // --- 基础连接 ---
-      this.socket.on('connect', () => {
-        this.isWsConnected = true
-        console.log('✅ [Socket] 连接成功! ID:', this.socket.id)
-      })
+    // ==========================================
+    // 2. 视图切换
+    // ==========================================
+    switchTeam(teamId) {
+      if (this.currentTeamId !== teamId) {
+        console.log(`🧹 [Store] 切换队伍视图: ${this.currentTeamId} -> ${teamId}`)
+        this.currentTeamId = teamId
 
-      this.socket.on('disconnect', () => {
-        this.isWsConnected = false
-        console.log('❌ [Socket] 连接断开')
-      })
-
-      // --- 业务监听 ---
-
-      // 1. 剧本创建
-      this.socket.on('game:game_created', (data) => {
-        console.log('📝 [Socket] 收到剧本信息:', data)
-        if (data.game_id)
-          this.gameId = data.game_id
-        uni.hideLoading()
-        uni.showToast({ title: '剧本已就绪', icon: 'success' })
-      })
-
-      // 2. 加入房间成功
-      this.socket.on('game:room_joined', (data) => {
-        console.log('🏠 [Socket] 成功加入房间:', data)
-        this.currentTeamId = data.team_id
-        this.updateRoomState(data.team_id, { memberCount: data.members_count })
-        uni.showToast({ title: '已进入房间', icon: 'none' })
-      })
-
-      // 3. 游戏开始
-      this.socket.on('game_started', (data) => {
-        console.log('🚀 [Socket] 游戏开始:', data)
-        this.isGameStarted = true
-        this.role = data.role || '游客'
-        this.currentTaskId = data.cur_task_id
-        this.currentTask = data.cur_task
-        uni.showToast({ title: '游戏开始！', icon: 'success' })
-      })
-
-      // 4. 成员加入
-      this.socket.on('team:member_joined', (data) => {
-        this.updateRoomState(data.team_id, {
-          memberCount: data.members_count,
-          members: data.all_members || [],
-        })
-      })
-
-      // 🆕 5. 成员离开 (补充)
-      this.socket.on('team:member_left', (data) => {
-        console.log('👋 [Socket] 成员离开:', data)
-        this.updateRoomState(data.team_id, {
-          memberCount: data.members_count,
-          members: data.all_members || [],
-        })
-      })
-
-      // 🆕 6. 新任务通知 (核心流程)
-      this.socket.on('game:new_task', (data) => {
-        console.log('📦 [Socket] 新任务:', data)
-        // 更新当前任务数据
-        if (data.task) {
-          this.currentTask = data.task
-          this.currentTaskId = data.task_id
-        }
-        // 提示用户
-        uni.vibrateLong()
-        uni.showModal({
-          title: '新任务',
-          content: data.task_msg || '任务目标已更新',
-          showCancel: false,
-          confirmText: '收到',
-        })
-      })
-
-      // 🆕 7. 机制完成 (如：某个子步骤完成、GPS验证通过)
-      this.socket.on('game:mechanism_complete', (data) => {
-        console.log('⚙️ [Socket] 机制达成:', data)
-        // 记录到本地状态，以便 UI 显示勾选状态
-        this.recordMechanism(data.task_id, data.sub_task_id, data.completed_mechanism)
-        uni.showToast({ title: '操作成功', icon: 'success' })
-      })
-
-      // 🆕 8. 任务完成 (大任务或子任务)
-      this.socket.on('game:task_complete', (data) => {
-        console.log('✅ [Socket] 任务完成:', data)
-        uni.showToast({ title: '任务完成！', icon: 'success' })
-        // 如果是子任务，记录下来
-        if (data.sub_task_id) {
-          this.completeSubTask(data.task_id, data.sub_task_id)
-        }
-      })
-
-      // 🆕 9. 任务失败
-      this.socket.on('game:task_failed', (data) => {
-        console.error('❌ [Socket] 任务失败:', data)
-        uni.showModal({
-          title: '任务失败',
-          content: data.task_msg || '请重试',
-          showCancel: false,
-          confirmColor: '#DD524D',
-        })
-      })
-
-      // 🆕 10. 图片验证流程 (开始)
-      this.socket.on('game:image_verify_start', () => {
-        this.uploadStatus = 'verifying'
-        uni.showLoading({ title: 'AI 正在识别...' })
-      })
-
-      // 🆕 11. 图片验证结果
-      this.socket.on('game:image_verify_result', (data) => {
-        uni.hideLoading()
-        this.uploadStatus = data.success ? 'success' : 'fail'
-        if (data.success) {
-          uni.showToast({ title: '识别成功', icon: 'success' })
+        // 尝试从缓存恢复 GameID
+        const cachedGameId = this.teamGameMap[teamId]
+        if (cachedGameId) {
+          this.gameId = cachedGameId
         }
         else {
-          uni.showModal({
-            title: '识别不匹配',
-            content: `目标: ${data.target_attraction || '未知'}\n识别为: ${data.identified_attraction || '未知'}`,
-            showCancel: false,
-          })
-        }
-      })
-
-      // 🆕 12. 图片验证错误
-      this.socket.on('game:image_verify_error', (data) => {
-        uni.hideLoading()
-        this.uploadStatus = 'fail'
-        uni.showToast({ title: '识别出错', icon: 'none' })
-      })
-
-      // 全局错误
-      this.socket.on('game:error', (err) => {
-        console.error('🔥 [Socket服务端报错]', err)
-        uni.hideLoading()
-      })
-    },
-
-    // --- 加入房间 ---
-    joinTeam(teamId, userInfo) {
-      return new Promise((resolve, reject) => {
-        if (!this.checkConnection())
-          return reject('Socket未连接')
-
-        const successHandler = (data) => {
-          if (data.team_id === teamId) {
-            this.socket.off('game:room_joined', successHandler)
-            this.currentTeamId = data.team_id
-            this.updateRoomState(data.team_id, { memberCount: data.members_count })
-            resolve(true)
-          }
-        }
-        this.socket.on('game:room_joined', successHandler)
-
-        this.socket.emit('game:join_room', {
-          team_id: teamId,
-          user_id: userInfo.userId, // 确保这是 ID
-          username: userInfo.userName,
-        })
-
-        setTimeout(() => {
-          this.socket.off('game:room_joined', successHandler)
-          // 这里不做 reject，防止重连时报错影响体验
-        }, 5000)
-      })
-    },
-
-    // --- 选剧本 ---
-    selectScript(teamId, scriptId) {
-      if (!this.checkConnection())
-        return
-      const payload = { team_id: teamId, script_id: scriptId, timestamp: new Date().toISOString() }
-      this.socket.emit('game:select_script', payload)
-    },
-
-    // --- 开始游戏 ---
-    startGame(gameId) {
-      return new Promise((resolve, reject) => {
-        if (!this.checkConnection())
-          return reject('Socket未连接')
-
-        const successHandler = (data) => {
-          cleanup()
-          resolve(data)
-        }
-        const errorHandler = (err) => {
-          cleanup()
-          reject(err.message || '启动失败')
-        }
-        const cleanup = () => {
-          this.socket.off('game_started', successHandler)
-          this.socket.off('game:error', errorHandler)
+          this.gameId = ''
         }
 
-        this.socket.once('game_started', successHandler)
-        this.socket.once('game:error', errorHandler)
-        this.socket.emit('game:start', { game_id: gameId })
-
-        setTimeout(() => {
-          cleanup()
-          reject('请求超时')
-        }, 8000)
-      })
-    },
-
-    // --- 辅助方法 ---
-    checkConnection() {
-      if (!this.socket || !this.isWsConnected) {
-        uni.showToast({ title: '网络未连接', icon: 'none' })
-        return false
+        // 重置任务状态，防止显示上一个队伍的残留信息
+        this.currentTaskId = ''
+        this.currentTask = null
+        this.isCurrentTaskComplete = false
+        this.completedMechanisms = {}
       }
-      return true
     },
 
-    updateRoomState(teamId, newState) {
-      if (!teamId)
+    // ==========================================
+    // 3. 核心状态更新 (Socket数据 -> Store)
+    // ==========================================
+    updateGameState(data) {
+      // 兼容解包
+      const rawData = data.player_state || data
+      if (!rawData)
         return
-      this.roomStates[teamId] = { ...(this.roomStates[teamId] || {}), ...newState }
+
+      // --- A. ID 提取与映射 ---
+      let incomingTeamId = data.team_id || rawData.team_id
+      let incomingGameId = data.game_id || rawData.game_id
+
+      // 兜底：假设是当前队伍
+      if (!incomingTeamId && this.currentTeamId) {
+        incomingTeamId = this.currentTeamId
+      }
+
+      // 更新映射表
+      if (incomingTeamId && incomingGameId) {
+        this.setTeamGameMapping(incomingTeamId, incomingGameId)
+      }
+
+      // ⛔ 过滤：非当前队伍的数据只更新映射，不更新 UI
+      if (incomingTeamId && incomingTeamId !== this.currentTeamId)
+        return
+
+      // --- B. 任务对象更新 ---
+      // 优先读 task (game:new_task)，其次 cur_task (player_state)
+      const taskObj = rawData.task || rawData.cur_task
+      const newTaskId = taskObj?.task_id || rawData.task_id || rawData.cur_task_id
+
+      if (newTaskId) {
+        // 🔥 状态重置：只要 ID 变了，说明进入了新关卡，立刻激活按钮
+        if (newTaskId !== this.currentTaskId) {
+          console.log(`🔀 [Store] 任务切换: ${this.currentTaskId} -> ${newTaskId}`)
+          this.isCurrentTaskComplete = false
+          this.currentTaskId = newTaskId
+        }
+      }
+
+      if (taskObj) {
+        this.currentTask = taskObj
+      }
+
+      // --- C. 进度同步 (可选，用于智能提交时的兜底判断) ---
+      if (rawData.completed_mechanisms)
+        this.completedMechanisms = rawData.completed_mechanisms
+      if (rawData.completed_subtasks)
+        this.completedSubtasks = rawData.completed_subtasks
     },
 
-    // 🆕 记录机制完成状态 (用于 UI 显示)
-    recordMechanism(taskId, subTaskId, mechanismKey) {
-      if (!this.completedMechanisms[taskId]) {
-        this.completedMechanisms[taskId] = {}
-      }
-      if (subTaskId) {
-        if (!this.completedMechanisms[taskId][subTaskId]) {
-          this.completedMechanisms[taskId][subTaskId] = {}
+    // ==========================================
+    // 4. 增量更新 (任务/机制完成通知)
+    // ==========================================
+    handleTaskComplete(data) {
+      if (data.team_id && data.team_id !== this.currentTeamId)
+        return
+
+      console.log('🎯 [Store] 收到任务完成信号:', data)
+
+      const { task_id, sub_task_id } = data
+
+      // 子任务完成：只更新进度记录
+      if (sub_task_id) {
+        if (!this.completedSubtasks[task_id])
+          this.completedSubtasks[task_id] = []
+        if (!this.completedSubtasks[task_id].includes(sub_task_id)) {
+          this.completedSubtasks[task_id].push(sub_task_id)
         }
-        this.completedMechanisms[taskId][subTaskId][mechanismKey] = true
+      }
+      // 大任务完成：界面变灰，等待 T+1
+      else {
+        // 宽容模式：只要 ID 对得上，或者本地还没 ID，都认账
+        if (this.currentTaskId === task_id || !this.currentTaskId) {
+          console.log('✅ [Store] 任务结束，进入等待状态')
+          this.isCurrentTaskComplete = true
+          if (!this.currentTaskId)
+            this.currentTaskId = task_id
+        }
+      }
+    },
+
+    handleMechanismComplete(data) {
+      if (data.team_id && data.team_id !== this.currentTeamId)
+        return
+
+      const { task_id, sub_task_id, completed_mechanism } = data
+      if (!task_id || !completed_mechanism)
+        return
+
+      if (!this.completedMechanisms[task_id])
+        this.completedMechanisms[task_id] = {}
+
+      // 简单粗暴地记录一下，供智能提交判断用
+      if (sub_task_id) {
+        if (!this.completedMechanisms[task_id][sub_task_id])
+          this.completedMechanisms[task_id][sub_task_id] = {}
+        this.completedMechanisms[task_id][sub_task_id][completed_mechanism] = true
       }
       else {
-        this.completedMechanisms[taskId][mechanismKey] = true
+        this.completedMechanisms[task_id][completed_mechanism] = true
       }
     },
-
-    // 🆕 记录子任务完成
-    completeSubTask(taskId, subTaskId) {
-      if (!this.completedSubtasks[taskId]) {
-        this.completedSubtasks[taskId] = []
-      }
-      if (!this.completedSubtasks[taskId].includes(subTaskId)) {
-        this.completedSubtasks[taskId].push(subTaskId)
-      }
-    },
-    /**
-     * 提交任务核心逻辑
-     * @param {object} payload 提交的数据
-     * @param {string} mechanismType 机制类型 (例如 'GPS_CHECK')
-     * @param {boolean} isMainTaskMechanism 是否为主任务机制 (用于辅助任务判定)
-     */
-    submitTask(data, mechanismType, isMainTaskMechanism = false) {
-      if (!this.checkConnection())
-        return
-
-      const submissionData = {
-        mechanism_type: mechanismType,
-        ...data, // 比如 { user_location_coordinate: [lng, lat] }
-      }
-
-      const payload = {
-        game_id: this.gameId,
-        task_id: this.currentTaskId,
-        submission_data: submissionData,
-        timestamp: new Date().toISOString(),
-      }
-
-      if (this.currentTask.having_sub_tasks && this.selectedSubTaskId) {
-      // isSubTaskAuxiliary 是我们在 getters 里写好的
-        if (!this.isSubTaskAuxiliary || !isMainTaskMechanism) {
-          payload.sub_task_id = this.selectedSubTaskId
-        }
-      }
-
-      console.log('📤 [Socket] 提交任务:', payload)
-      this.socket.emit('game:task_submit', payload)
-
-      uni.showLoading({ title: '提交中...' })
-      // 注意：结果会通过 game:mechanism_complete 或 game:task_complete 异步返回
-      setTimeout(() => uni.hideLoading(), 2000)
-    },
-
   },
 })
