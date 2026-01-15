@@ -75,3 +75,13 @@ export function getTeamListAPI(params = {}) {
     },
   })
 }
+/**
+ * 获取队伍成员列表
+ * @param {string} teamId 队伍ID
+ */
+export function getTeamMembersAPI(teamId) {
+  return request({
+    url: `/api/v1/guide/teams/${teamId}/members`, // 注意：根据你 request 封装的基础路径，可能需要去掉 /api/v1 前缀
+    method: 'GET',
+  })
+}

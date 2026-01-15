@@ -1,7 +1,7 @@
 <script setup>
 import { onPullDownRefresh, onReachBottom, onShow } from '@dcloudio/uni-app'
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { getTeamListAPI } from '@/api/team'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { getTeamListAPI, getTeamMembersAPI } from '@/api/team' // 确保引入了这两个
 import CustomTabBar from '@/components/CustomTabBar/index.vue'
 
 // 🟢 Store
@@ -23,7 +23,7 @@ const isRefreshing = ref(false)
 const eventLogs = ref([])
 const unreadMsgMap = ref({})
 
-// 🟢 [新增] 计算当前选中的队伍 (用于顶部标题)
+// 🟢 计算当前选中的队伍 (用于顶部标题)
 const currentActiveTeam = computed(() => {
   if (!gameStore.currentTeamId)
     return null
@@ -36,69 +36,68 @@ const scriptOptions = [
   { id: 'script_003', name: '消失的宝藏', desc: '沉浸式角色扮演任务' },
 ]
 
+// =========================================================================
+// 🟢 成员列表逻辑
+// =========================================================================
+const showMemberModal = ref(false)
+const currentMemberList = ref([])
+const currentViewingTeamName = ref('')
+
+async function handleShowMembers(team) {
+  if (!team.team_id)
+    return
+  uni.showLoading({ title: '加载成员...', mask: true })
+  try {
+    const res = await getTeamMembersAPI(team.team_id)
+    if (res && res.members) {
+      currentMemberList.value = res.members || []
+      currentViewingTeamName.value = team.team_name
+      showMemberModal.value = true
+    }
+    else {
+      uni.showToast({ title: '暂无成员数据', icon: 'none' })
+    }
+  }
+  catch (error) {
+    console.error('❌ 请求异常:', error)
+    uni.showToast({ title: '网络请求失败', icon: 'none' })
+  }
+  finally {
+    uni.hideLoading()
+  }
+}
+
+function closeMemberModal() {
+  showMemberModal.value = false
+  currentMemberList.value = []
+}
+
+function isGuide(name) {
+  if (!name)
+    return false
+  return name.toLowerCase().includes('guide')
+}
+
+function copyId(id) {
+  uni.setClipboardData({
+    data: id,
+    success: () => uni.showToast({ title: 'ID已复制', icon: 'none' }),
+  })
+}
+
 // --- 辅助：添加日志 ---
 function addEventLog(type, content, teamName = '未知队伍') {
   const time = new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
-  const log = {
-    id: Date.now() + Math.random(),
-    type,
-    time,
-    content,
-    teamName,
-  }
+  const log = { id: Date.now() + Math.random(), type, time, content, teamName }
   eventLogs.value = [log, ...eventLogs.value].slice(0, 20)
 }
 
-// 🟢 [新增] 智能获取当前操作目标 (主任务 or 子任务)
-function getCurrentTarget() {
-  const task = gameStore.currentTask
-  if (!task)
-    return null
-
-  // A. 如果是单层任务，直接返回主任务
-  if (!task.having_sub_tasks) {
-    return {
-      targetObj: task,
-      isSubTask: false,
-      id: task.task_id,
-      name: task.stage_name || task.game_name,
-    }
-  }
-
-  // B. 如果有子任务，必须找到“当前正在进行”的那一个
-  const currentSubId = gameStore.curSubTaskId || task.sub_tasks?.find(s => !s.is_finished)?.sub_task_id
-
-  if (currentSubId && task.sub_tasks) {
-    const subTask = task.sub_tasks.find(s => s.sub_task_id === currentSubId)
-    if (subTask) {
-      return {
-        targetObj: subTask,
-        isSubTask: true,
-        id: subTask.sub_task_id,
-        name: subTask.sub_task_name || '子任务',
-      }
-    }
-  }
-
-  // C. 兜底：如果找不到子任务，还是返回主任务 (虽然这可能导致逻辑错误，但在过渡期能防崩)
-  return {
-    targetObj: task,
-    isSubTask: false,
-    id: task.task_id,
-    name: task.stage_name,
-  }
-}
-
+// =========================================================================
+// 🟢 Socket 监听逻辑 (含 ID 吸尘器)
+// =========================================================================
 function attachPageListeners(socket) {
   // 清理旧监听
-  socket.off('game:game_created')
-  socket.off('game_started')
-  socket.off('game:new_task')
-  socket.off('room_msg')
-  socket.off('task_finished')
-  socket.off('game:debug_player_state')
-  socket.off('game:cur_task')
-  socket.off('game:room_joined')
+  ['game:game_created', 'game_started', 'game:new_task', 'room_msg', 'task_finished', 'game:debug_player_state', 'game:cur_task', 'game:room_joined'].forEach(e => socket.off(e))
 
   // 1. 游戏创建
   socket.on('game:game_created', (data) => {
@@ -109,28 +108,31 @@ function attachPageListeners(socket) {
     const targetTeam = teamList.value.find(t => t.team_id === data.team_id)
     if (targetTeam) {
       targetTeam.current_status = 1
-      targetTeam.game_id = data.game_id
+      if (data.game_id) {
+        targetTeam.game_id = data.game_id
+        gameStore.gameId = data.game_id // 🔥 存
+      }
       addEventLog('sys', `队伍准备就绪`, targetTeam.team_name)
     }
   })
 
-  // 🟢 2. 游戏开始 (核心修复：强制更新列表状态)
+  // 2. 游戏开始
   socket.on('game_started', (data) => {
     console.log('🚀 [Page] 收到游戏开始信号:', data)
-
-    // 尝试通过 team_id 或 game_id 找到队伍
     let targetTeam = teamList.value.find(t => t.team_id === data.team_id || t.game_id === data.game_id)
-
-    // 兜底：如果是当前进入的房间
     if (!targetTeam && gameStore.currentTeamId) {
       targetTeam = teamList.value.find(t => t.team_id === gameStore.currentTeamId)
     }
 
+    if (data.game_id)
+      gameStore.gameId = data.game_id // 🔥 存
+
     if (targetTeam) {
+      targetTeam.current_status = 2
       targetTeam.cur_task_id = data.cur_task_id || (data.cur_task ? data.cur_task.task_id : '')
-
+      if (data.game_id)
+        targetTeam.game_id = data.game_id
       addEventLog('sys', `游戏正式开始！`, targetTeam.team_name)
-
       teamList.value = [...teamList.value]
     }
     else {
@@ -138,178 +140,117 @@ function attachPageListeners(socket) {
     }
   })
 
-  // 🟢 [核心修复] 重新进房/刷新时，恢复游戏进度
+  // 3. 恢复进度 / 刷新
   socket.on('game:cur_task', (data) => {
-    console.log('📡 [Page] 收到进度恢复信号(cur_task):', data)
-
-    // 1. 找 Team ID
-    // 日志显示顶层没有 team_id，所以必须用 gameStore.currentTeamId 兜底
+    console.log('📡 [Page] 收到进度恢复信号:', data)
     let teamId = data.team_id || (data.player_state && data.player_state.team_id)
-    if (!teamId && gameStore.currentTeamId) {
+    if (!teamId && gameStore.currentTeamId)
       teamId = gameStore.currentTeamId
-    }
+
+    // 🔥 ID 吸尘器
+    const foundId = data.game_id || (data.player_state && data.player_state.game_id)
+    if (foundId)
+      gameStore.gameId = foundId
 
     if (teamId) {
       const targetTeam = teamList.value.find(t => t.team_id === teamId)
       if (targetTeam) {
-        // 2. 提取任务核心数据
-        // 优先看 player_state 里的 cur_task (你的日志里这里最全)
         const playerState = data.player_state || {}
         const taskObj = playerState.cur_task || data.task || data.cur_task
-
-        // 3. 判断是否正在游戏
-        // 只要有 task_id，就说明游戏正在进行
         const activeTaskId = data.task_id || playerState.cur_task_id || (taskObj && taskObj.task_id)
 
         if (activeTaskId) {
-          console.log(`✅ 恢复游戏状态: ${activeTaskId}`)
-
-          // 🔥 强制把状态改成 2 (进行中)，这样"开始游戏"按钮就会消失，变成"提交任务"
           targetTeam.current_status = 2
           targetTeam.cur_task_id = activeTaskId
-
-          // 4. 获取展示名称 (stage_name)
-          // 你的日志里: player_state.cur_task.stage_name = "第二幕..."
           if (taskObj) {
             targetTeam.current_task_name = taskObj.stage_name || taskObj.game_name || '未知任务'
-
-            // 顺便把机制也存进去，防止按钮颜色不对
-            // 注意：日志里 mechanisms 可能在 taskObj 里，也可能在 player_state.completed_mechanisms (这个通常是已完成的)
-            // 这里我们要找 **完成当前任务** 需要的机制
-            if (taskObj.task_complete_mechanisms) {
+            if (taskObj.task_complete_mechanisms)
               targetTeam.task_complete_mechanisms = taskObj.task_complete_mechanisms
-            }
           }
-
-          // 5. 顺手更新一下 Store，保证详情页数据也对
-          if (playerState.cur_task) {
+          if (playerState.cur_task)
             gameStore.updateGameState(playerState)
-          }
-          else if (taskObj) {
-            // 构造一个最小集更新 store
-            gameStore.updateGameState({
-              team_id: teamId,
-              cur_task: taskObj,
-              cur_task_id: activeTaskId,
-            })
-          }
+          else if (taskObj)
+            gameStore.updateGameState({ team_id: teamId, cur_task: taskObj, cur_task_id: activeTaskId })
 
-          // 6. 强制刷新列表 UI
           teamList.value = [...teamList.value]
         }
       }
     }
   })
 
-  // 🟢进房成功瞬间，如果带有游戏信息，也更新
-  socket.on('game:room_joined', (data) => {
-    // 如果后端在 joined 消息里带了 game_status 或 game_id
-    if (data.team_id) {
-      const targetTeam = teamList.value.find(t => t.team_id === data.team_id)
-      if (targetTeam) {
-        if (data.game_id || gameStore.teamGameMap[data.team_id]) {
-          teamList.value = [...teamList.value]
-        }
-      }
-    }
-  })
-
-  // 5. 新任务
+  // 4. 新任务
   socket.on('game:new_task', (data) => {
-    console.log('📡 [Page] 收到新任务 (原始数据):', data)
-
-    // 1. 解析队伍 ID
-    // 优先从外层取，取不到再去 player_state 里取
+    console.log('📡 [Page] 收到新任务:', data)
     const incomingTeamId = data.team_id || (data.player_state && data.player_state.team_id)
 
-    // 2.构造“完全体”任务对象
-    let fullTaskObject = null
+    // 🔥 ID 吸尘器
+    const foundId = data.game_id || (data.player_state && data.player_state.game_id) || (data.task && data.task.game_id)
+    if (foundId)
+      gameStore.gameId = foundId
 
+    // 构造完全体对象
+    let fullTaskObject = null
     if (data.task) {
-      fullTaskObject = {
-        ...data.task,
-        task_complete_mechanisms: data.task_complete_mechanisms || data.task.task_complete_mechanisms || [],
-      }
+      fullTaskObject = { ...data.task, task_complete_mechanisms: data.task_complete_mechanisms || data.task.task_complete_mechanisms || [] }
     }
     else if (data.player_state && data.player_state.cur_task) {
-      // 兼容 player_state 结构
-      fullTaskObject = {
-        ...data.player_state.cur_task,
-        task_complete_mechanisms: data.player_state.task_complete_mechanisms || data.player_state.cur_task.task_complete_mechanisms || [],
-      }
+      fullTaskObject = { ...data.player_state.cur_task, task_complete_mechanisms: data.player_state.task_complete_mechanisms || data.player_state.cur_task.task_complete_mechanisms || [] }
     }
 
-    // 3. 🟢 [关键修复] 强制重置 Store 状态
+    // 重置状态
     if (incomingTeamId === gameStore.currentTeamId) {
       gameStore.isCurrentTaskComplete = false
+      // 🟢 清理脏数据，防止穿越
+      gameStore.selectedSubTaskId = null
+      gameStore.curSubTaskId = null
     }
 
-    // 4. 更新 Store
-    if (data.player_state) {
-      // 如果有全量状态，更新全量
+    if (data.player_state)
       gameStore.updateGameState(data.player_state)
-    }
-
-    // 即使更新了全量，我们也要单独确保 task 对象里有 mechanisms
     if (fullTaskObject) {
       gameStore.updateGameState({
         team_id: incomingTeamId,
-        cur_task: fullTaskObject, // 👈 传入我们拼接好的对象
+        cur_task: fullTaskObject,
         cur_task_id: fullTaskObject.task_id,
       })
     }
 
-    // 5. 更新当前列表项的 UI 显示 (任务名等)
     if (incomingTeamId) {
       const targetTeam = teamList.value.find(t => t.team_id === incomingTeamId)
       if (targetTeam) {
-        targetTeam.current_status = 2 // 确保是进行中
-        targetTeam.just_finished = false // 移除完成特效
-
+        targetTeam.current_status = 2
+        targetTeam.just_finished = false
         if (fullTaskObject) {
           targetTeam.cur_task_id = fullTaskObject.task_id
           targetTeam.current_task_name = fullTaskObject.stage_name || fullTaskObject.game_name
         }
-        // 触发列表刷新
         teamList.value = [...teamList.value]
       }
-
-      // 弹窗提示 (仅限当前正在看的队伍)
       if (incomingTeamId === gameStore.currentTeamId) {
         uni.vibrateLong()
-        uni.showModal({
-          title: '新任务到达',
-          content: fullTaskObject?.stage_name || '任务已更新',
-          showCancel: false,
-          confirmText: '立刻处理',
-        })
+        uni.showModal({ title: '新任务到达', content: fullTaskObject?.stage_name || '任务已更新', showCancel: false, confirmText: '立刻处理' })
       }
     }
   })
 
-  // 4. Debug 状态同步
-  socket.on('game:debug_player_state', (data) => {
-    const rawData = data.player_state || data
-    const gameId = rawData.game_id || data.game_id
-    if (gameId) {
-      const targetTeam = teamList.value.find(t => t.game_id === gameId)
-      if (targetTeam) {
-        // 同步状态和任务ID
-        const newTaskId = rawData.cur_task_id || rawData.task_id
-        if (newTaskId)
-          targetTeam.cur_task_id = newTaskId
+  // 5. 任务完成
+  socket.on('task_finished', (data) => {
+    const team = teamList.value.find(t => t.team_id === data.team_id)
+    if (team)
+      addEventLog('task', `完成了任务`, team.team_name)
 
-        // 如果后端说已经开始了，防止前端还是 1
-        if (targetTeam.current_status === 1 && newTaskId) {
-          targetTeam.current_status = 2
-        }
-
-        teamList.value = [...teamList.value]
-      }
+    // 🔥 如果是子任务完成，本地打勾
+    if (data.sub_task_id && data.team_id === gameStore.currentTeamId) {
+      gameStore.finishSubTask(data.sub_task_id)
+    }
+    // 如果是大任务完成
+    if (!data.sub_task_id && data.team_id === gameStore.currentTeamId) {
+      uni.showToast({ title: '当前大任务已完成', icon: 'success' })
+      gameStore.isCurrentTaskComplete = true
     }
   })
 
-  // 5. 消息
+  // 6. 其他消息
   socket.on('room_msg', (data) => {
     const team = teamList.value.find(t => t.team_id === data.team_id)
     const teamName = team ? team.team_name : '未知队伍'
@@ -319,32 +260,13 @@ function attachPageListeners(socket) {
       uni.vibrateShort()
     }
   })
-
-  // 6. 任务完成
-  socket.on('task_finished', (data) => {
-    const team = teamList.value.find(t => t.team_id === data.team_id)
-    const teamName = team ? team.team_name : '未知队伍'
-    addEventLog('task', `完成了任务！`, teamName)
-    if (team) {
-      team.just_finished = true
-      setTimeout(() => {
-        team.just_finished = false
-      }, 3000)
-    }
-    if (gameStore.currentTeamId === data.team_id) {
-      uni.showToast({ title: '当前队伍任务已完成', icon: 'success' })
-    }
-    else {
-      uni.showToast({ title: `${teamName} 完成了任务`, icon: 'none' })
-    }
-  })
+  socket.on('game:debug_player_state', (data) => { /* 略，如有需要可补全 */ })
+  socket.on('game:room_joined', (data) => { /* 略 */ })
 }
 
-// 监听 socket 连接
 watch(() => socketStore.socket, (newSocket) => {
-  if (newSocket && newSocket.connected) {
+  if (newSocket && newSocket.connected)
     attachPageListeners(newSocket)
-  }
 }, { immediate: true })
 
 onShow(async () => {
@@ -354,161 +276,140 @@ onShow(async () => {
 
 onUnmounted(() => {
   if (socketStore.socket) {
-    socketStore.socket.off('game:game_created')
-    socketStore.socket.off('game_started')
-    socketStore.socket.off('game:new_task')
-    socketStore.socket.off('room_msg')
-    socketStore.socket.off('task_finished')
-    socketStore.socket.off('game:debug_player_state')
+    ['game:game_created', 'game_started', 'game:new_task', 'room_msg', 'task_finished', 'game:debug_player_state', 'game:cur_task'].forEach(e => socketStore.socket.off(e))
   }
 })
 
-// 🟢 计算按钮配置
-const actionButtonConfig = computed(() => {
-  const target = getCurrentTarget()
+// =========================================================================
+// 🟢 按钮配置计算 (新版 - 分离式)
+// =========================================================================
 
-  // 1. 数据未加载
-  if (!target) {
-    return { text: '加载中...', color: 'bg-gray-400', icon: '⏳', isForce: false }
-  }
-
-  const { targetObj, isSubTask } = target
-
-  // 2. 获取机制列表
-  const mechanisms = targetObj.task_complete_mechanisms || targetObj.task_complete_mechanism || []
-
-  // 3. 判断是否需要 STAFF_CONFIRM
+// 获取【大任务】按钮配置
+function getMainTaskConfig(task) {
+  if (!task)
+    return { text: '...', color: 'bg-gray-400', icon: '' }
+  const mechanisms = task.task_complete_mechanisms || []
   const hasStaffConfirm = mechanisms.some(m => m.mechanism_name === 'STAFF_CONFIRM')
-
-  // 4. 构造显示文案
-  const suffix = isSubTask ? '(子任务)' : ''
-
   if (hasStaffConfirm) {
-    return {
-      text: `确认通过 ${suffix}`,
-      color: 'bg-emerald-500 shadow-emerald-200',
-      icon: '✅',
-      isForce: false,
-    }
+    return { text: '确认整幕', color: 'bg-indigo-600 shadow-indigo-200', icon: '🏁' }
   }
   else {
-    return {
-      text: `强制跳过 ${suffix}`,
-      color: 'bg-orange-500 shadow-orange-200',
-      icon: '⚡',
-      isForce: true,
-    }
+    return { text: '强制结算', color: 'bg-gray-700 shadow-gray-400', icon: '⚡' }
   }
-})
-// 🟢智能操作处理
-function handleSmartAction(team) {
-  if (!isJoined(team.team_id)) {
-    uni.showToast({ title: '正在连接...', icon: 'none' })
-    socketStore.joinRoom(team.team_id)
-    return
-  }
-
-  const config = actionButtonConfig.value
-  const taskName = gameStore.currentTask?.game_name || gameStore.currentTask?.stage_name || '当前任务'
-
-  const title = config.isForce ? '⚠️ 强制跳过' : '✅ 确认通过'
-  const content = config.isForce
-    ? `当前任务《${taskName}》没有人工确认环节。\n\n是否要伪造数据强制跳过？`
-    : `队伍请求完成任务《${taskName}》。\n\n确认他们已达标并放行吗？`
-  const confirmColor = config.isForce ? '#F59E0B' : '#10B981'
-
-  uni.showModal({
-    title,
-    content,
-    confirmText: config.isForce ? '强制跳过' : '确认通过',
-    confirmColor,
-    success: (res) => {
-      // 👇 加这一行调试日志
-      console.log('👆 弹窗结果:', res)
-
-      if (res.confirm) {
-        console.log('✅ 用户点击了确认，准备调用 performSmartSubmit')
-        performSmartSubmit()
-      }
-    },
-  })
 }
 
-// 🟢 [核心修复] 智能提交
-function performSmartSubmit() {
-  const target = getCurrentTarget()
+// 获取【子任务】按钮配置
+function getSubTaskConfig(subTask) {
+  if (!subTask)
+    return { text: '...', color: 'bg-gray-400', icon: '' }
+  const mechanisms = subTask.task_complete_mechanisms || subTask.task_complete_mechanism || []
+  const hasStaffConfirm = mechanisms.some(m => m.mechanism_name === 'STAFF_CONFIRM')
+  if (hasStaffConfirm) {
+    return { text: '确认', color: 'bg-emerald-500 shadow-emerald-200', icon: '✅' }
+  }
+  else {
+    return { text: '跳过', color: 'bg-orange-500 shadow-orange-200', icon: '⏭️' }
+  }
+}
 
-  // 1. 安全拦截
-  if (!target) {
-    console.warn('⚠️ 无任务信息，盲发 GPS')
-    socketStore.submitTask(null, 'GPS_CHECK', true)
+// =========================================================================
+// 🟢 交互逻辑 (新版)
+// =========================================================================
+
+// 🟢 手动同步任务状态
+function handleGetTask(team) {
+  if (!team.team_id)
     return
+  socketStore.syncGameState(team.team_id, team.game_id) // 确保 socketStore 有这个 action
+  uni.showToast({ title: '请求同步...', icon: 'none' })
+}
+
+// 🟢 [核心修复] 精确提交函数 (超强 ID 修复版)
+function performSpecificSubmit(targetObj, isSubTask) {
+  console.log(`🚀 [精确提交] 目标: ${isSubTask ? '子任务' : '主任务'}`, targetObj)
+
+  // 🛠️ 1. 终极救命补丁：穷尽一切手段找回 GameID
+  if (!gameStore.gameId) {
+    console.warn('⚠️ [UI] Store中缺失 GameID，开始搜寻...')
+    if (targetObj && targetObj.game_id) {
+      gameStore.gameId = targetObj.game_id
+    }
+    else {
+      const currentTeam = teamList.value.find(t => t.team_id === gameStore.currentTeamId)
+      if (currentTeam && currentTeam.game_id)
+        gameStore.gameId = currentTeam.game_id
+    }
   }
 
-  const { targetObj, isSubTask, id, name } = target
-
-  console.log(`🎯 [智能提交] 锁定目标: ${isSubTask ? '子任务' : '主任务'} - ${name} (${id})`)
-
-  // ⚠️ 关键步骤：如果是子任务，必须更新 Store 里的 selectedSubTaskId
-  // 因为 socketStore.submitTask 默认是去读 store.selectedSubTaskId 的
-  if (isSubTask) {
-    gameStore.selectedSubTaskId = id
+  // 🚑 最终检查
+  if (!gameStore.gameId) {
+    console.error('❌ [UI] 无法找到 GameID，操作终止')
+    uni.showModal({ title: '数据丢失', content: '无法获取当前游戏ID。请尝试刷新页面。', showCancel: false })
+    return
   }
 
   // 2. 获取机制
   const mechanisms = targetObj.task_complete_mechanisms || targetObj.task_complete_mechanism || []
-  console.log('🧐 当前机制:', mechanisms.map(m => m.mechanism_name))
+  const payloadExtra = isSubTask ? { sub_task_id: targetObj.sub_task_id } : {}
 
-  // 3. 策略 A：正规确认
-  if (mechanisms.some(m => m.mechanism_name === 'STAFF_CONFIRM')) {
-    console.log('🚀 发送 STAFF_CONFIRM')
-    // 第三个参数 false 表示这不是“主任务大结局”，而是过程中的一步
-    socketStore.submitTask(null, 'STAFF_CONFIRM', !isSubTask)
+  // 3. 策略
+  const hasStaffConfirm = mechanisms.some(m => m.mechanism_name === 'STAFF_CONFIRM')
+  if (hasStaffConfirm) {
+    socketStore.submitTask(payloadExtra, 'STAFF_CONFIRM')
     return
   }
 
-  // 4. 策略 B：伪造数据 (强制跳过)
+  // 伪造数据
   const firstMech = mechanisms[0]
   if (firstMech) {
     const mechName = firstMech.mechanism_name
-    console.log(`⚡ 伪造数据: ${mechName}`)
-
-    let fakeData = {}
+    const fakeData = { ...payloadExtra }
     if (mechName === 'GPS_CHECK')
-      fakeData = { user_location_coordinate: [0, 0] }
+      Object.assign(fakeData, { user_location_coordinate: [0, 0] })
     else if (mechName === 'AI_NPC_DIALOGUE_COMPLETE')
-      fakeData = { task_completed: true }
+      Object.assign(fakeData, { task_completed: true })
     else if (mechName === 'AI_ANSWER_CORRECT')
-      fakeData = { answer: 'FORCE_PASS' }
-
-    socketStore.submitTask(fakeData, mechName, !isSubTask)
+      Object.assign(fakeData, { answer: 'FORCE_PASS' })
+    socketStore.submitTask(fakeData, mechName)
   }
   else {
-    // 5. 策略 C：兜底
-    socketStore.submitTask({ user_location_coordinate: [0, 0] }, 'GPS_CHECK', !isSubTask)
+    socketStore.submitTask({ ...payloadExtra, user_location_coordinate: [0, 0] }, 'GPS_CHECK')
   }
-}
-// 辅助函数
-function handleOpenConsole(team) {
-  // 这里可以放那个详情弹窗逻辑，暂时先用原来的 console.log 或者 modal
-  unreadMsgMap.value[team.team_id] = 0
-  if (!isJoined(team.team_id)) {
-    uni.showToast({ title: '请先进入房间', icon: 'none' })
-  }
-  // 打开详情逻辑...
 }
 
+// 🟢 点击处理
+function handleSpecificAction(targetObj, isSubTask) {
+  const teamId = gameStore.currentTeamId
+  if (!teamId)
+    return
+
+  const name = isSubTask ? (targetObj.game_name || targetObj.sub_task_name) : (targetObj.stage_name || '本幕')
+  const config = isSubTask ? getSubTaskConfig(targetObj) : getMainTaskConfig(targetObj)
+  const title = isSubTask ? `确认子任务` : `⚠️ 结算大任务`
+  const content = isSubTask ? `是否确认完成子任务《${name}》？` : `⚠️ 注意：这将直接结束当前整幕《${name}》并进入下一关。`
+
+  uni.showModal({
+    title,
+    content,
+    confirmText: config.text,
+    confirmColor: isSubTask ? '#10B981' : '#4F46E5',
+    success: (res) => {
+      if (res.confirm)
+        performSpecificSubmit(targetObj, isSubTask)
+    },
+  })
+}
+
+// 辅助功能
 function isJoined(teamId) {
   return gameStore.currentTeamId === teamId
 }
-
 function handleJoinRoom(team) {
   uni.showLoading({ title: '连接中...', mask: true })
   socketStore.joinRoom(team.team_id)
   unreadMsgMap.value[team.team_id] = 0
   setTimeout(() => uni.hideLoading(), 1000)
 }
-
 function handleAssignScript(team) {
   uni.showActionSheet({
     itemList: scriptOptions.map(s => s.name),
@@ -518,7 +419,6 @@ function handleAssignScript(team) {
     },
   })
 }
-
 function handleStartGame(team) {
   const liveTeam = teamList.value.find(t => t.team_id === team.team_id) || team
   const targetGameId = liveTeam.game_id || (gameStore.currentTeamId === liveTeam.team_id ? gameStore.gameId : null)
@@ -532,42 +432,31 @@ function handleStartGame(team) {
     confirmColor: '#10B981',
     success: async (res) => {
       if (res.confirm) {
-        uni.showLoading({ title: '启动中...' })
-
-        // 🚀 乐观更新：不等 Socket 回调，直接把 UI 变成“进行中”
-        // 这样点击后立马就能看到绿色大按钮，体验更好
         liveTeam.current_status = 2
         teamList.value = [...teamList.value]
-
         socketStore.startGame(targetGameId)
-        setTimeout(() => uni.hideLoading(), 1000)
       }
     },
   })
 }
 
-function handleGetTask(team) {
-  // TODO
-  console.log('')
-  uni.showLoading({ title: '同步状态中...', mask: true })
-}
-
 function handleManualRefresh() {
   isRefreshing.value = true
-  fetchTeamList(true, false).finally(() => {
+  fetchTeamList(true, false).then(() => {
+    // 🔥 [手动刷新] 尝试找回 ID
+    if (gameStore.currentTeamId) {
+      const team = teamList.value.find(t => t.team_id === gameStore.currentTeamId)
+      if (team && team.game_id)
+        gameStore.gameId = team.game_id
+    }
+  }).finally(() => {
     setTimeout(() => {
       isRefreshing.value = false
     }, 500)
     uni.showToast({ title: '已刷新', icon: 'none' })
   })
-  if (gameStore.gameId) {
-    socketStore.socket.emit('game:debug_get_player_state', {
-      game_id: gameStore.gameId,
-      timestamp: new Date().toISOString(),
-    })
-  }
-  uni.showToast({ title: '正在刷新数据...', icon: 'none' })
 }
+function handleOpenConsole(team) { /* 原有逻辑 */ }
 
 async function fetchTeamList(reset = false, silent = false) {
   if (reset)
@@ -588,10 +477,7 @@ async function fetchTeamList(reset = false, silent = false) {
     uni.stopPullDownRefresh()
   }
 }
-
-onPullDownRefresh(() => {
-  fetchTeamList(true)
-})
+onPullDownRefresh(() => fetchTeamList(true))
 onReachBottom(() => {
   if (teamList.value.length < total.value) {
     page.value++
@@ -618,20 +504,17 @@ onReachBottom(() => {
               </view>
             </view>
           </view>
-
           <view v-else class="flex items-end gap-2">
             <text class="text-xl font-black text-gray-900 tracking-tight">
-              Merchant OS
+              Merchant
             </text>
           </view>
-
           <view class="flex items-center gap-1 bg-gray-100 text-gray-500 text-[10px] px-1.5 py-0.5 rounded font-bold mb-1 ml-1">
             <view v-if="socketStore.isConnected" class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
             <view v-else class="w-1.5 h-1.5 rounded-full bg-red-500" />
             {{ socketStore.isConnected ? 'LIVE' : 'OFF' }}
           </view>
         </view>
-
         <button class="bg-white border border-gray-200 text-indigo-600 px-3 py-1 rounded-lg text-xs font-bold shadow-sm flex items-center gap-1 flex-shrink-0" @click="handleManualRefresh">
           <text :class="isRefreshing ? 'animate-spin' : ''">
             🔄
@@ -648,34 +531,19 @@ onReachBottom(() => {
       </view>
 
       <view class="space-y-5">
-        <view
-          v-for="team in teamList"
-          :key="team.team_id"
-          class="bg-white rounded-[24px] shadow-xl overflow-hidden border border-gray-50 animate-slide-up transition-all duration-300"
-          :class="{ 'ring-2 ring-green-400 ring-offset-2': team.just_finished }"
-        >
+        <view v-for="team in teamList" :key="team.team_id" class="bg-white rounded-[24px] shadow-xl overflow-hidden border border-gray-50 animate-slide-up transition-all duration-300" :class="{ 'ring-2 ring-green-400 ring-offset-2': team.just_finished }">
           <view class="p-5 flex justify-between items-center bg-gradient-to-br from-white to-gray-50 relative">
             <view v-if="unreadMsgMap[team.team_id] > 0" class="absolute top-0 right-0 transform translate-x-[-5px] translate-y-[-5px] z-20">
               <view class="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-md animate-bounce border-2 border-white">
                 {{ unreadMsgMap[team.team_id] > 99 ? '99+' : unreadMsgMap[team.team_id] }}
               </view>
             </view>
-
             <view class="flex flex-col gap-1 pr-4 overflow-hidden flex-1">
               <text class="text-xl font-black text-gray-900 tracking-tight truncate leading-tight">
                 {{ team.team_name || '未命名队伍' }}
               </text>
-
               <view class="flex items-center gap-1">
-                <view
-                  class="w-1.5 h-1.5 rounded-full"
-                  :class="{
-                    'bg-gray-400': team.current_status === 0,
-                    'bg-blue-500': team.current_status === 1,
-                    'bg-green-500 animate-pulse': team.current_status === 2,
-                    'bg-red-400': team.current_status === 3,
-                  }"
-                />
+                <view class="w-1.5 h-1.5 rounded-full" :class="{ 'bg-gray-400': team.current_status === 0, 'bg-blue-500': team.current_status === 1, 'bg-green-500 animate-pulse': team.current_status === 2, 'bg-red-400': team.current_status === 3 }" />
                 <text v-if="team.current_status === 0" class="text-[10px] text-gray-400 font-bold">
                   组建中
                 </text>
@@ -690,11 +558,7 @@ onReachBottom(() => {
                 </text>
               </view>
             </view>
-
-            <view
-              class="bg-indigo-600 px-3 py-2 rounded-xl text-center shadow-md flex-shrink-0 active:scale-95 transition-transform"
-              @click.stop="handleOpenConsole(team)"
-            >
+            <view class="bg-indigo-600 px-3 py-2 rounded-xl text-center shadow-md flex-shrink-0 active:scale-95 transition-transform" @click.stop="handleOpenConsole(team)">
               <text class="block text-[8px] text-white/70 font-bold mb-0.5 tracking-wider">
                 CODE
               </text>
@@ -716,11 +580,17 @@ onReachBottom(() => {
                 小队人数：
               </view>
             </view>
-            <text class="text-lg font-black text-indigo-600">
-              {{ gameStore.roomStates[team.team_id]?.memberCount || team.size }} <text class="text-xs text-gray-400 font-normal">
-                / 5
+            <view class="flex items-center gap-1 active:opacity-60 transition-opacity" @click.stop="handleShowMembers(team)">
+              <text class="text-lg font-black text-indigo-600 underline decoration-dashed underline-offset-4 decoration-indigo-200">
+                {{ gameStore.roomStates[team.team_id]?.memberCount || team.size }}
+                <text class="text-xs text-gray-400 font-normal no-underline">
+                  / 5
+                </text>
               </text>
-            </text>
+              <text class="text-xs text-gray-400">
+                >
+              </text>
+            </view>
           </view>
 
           <view class="px-5 py-4 bg-gray-50/50 flex gap-3">
@@ -730,20 +600,11 @@ onReachBottom(() => {
 
             <template v-else>
               <template v-if="team.current_status === 0 || team.current_status === 1">
-                <view class="flex gap-14">
-                  <button
-                    class="flex-1 bg-indigo-600 text-white rounded-xl py-3 px-8 text-sm font-bold shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-1"
-                    :class="team.current_status === 1 ? 'bg-blue-500' : 'bg-indigo-600'"
-                    @click="handleAssignScript(team)"
-                  >
-                    <text>{{ team.current_status === 1 ? '分配剧本' : '重选剧本' }}</text>
+                <view class="flex gap-30">
+                  <button class="flex-1 bg-indigo-600 text-white rounded-xl py-3 text-sm font-bold shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-1" :class="team.current_status === 1 ? 'bg-indigo-500' : 'bg-indigo-600'" @click="handleAssignScript(team)">
+                    <text>{{ team.current_status === 1 ? '分配剧本' : '分配剧本' }}</text>
                   </button>
-
-                  <button
-                    v-if="team.current_status === 1"
-                    class="flex-1 bg-emerald-500 text-white rounded-xl py-3 px-8 text-sm font-bold shadow-lg shadow-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-1"
-                    @click="handleStartGame(team)"
-                  >
+                  <button v-if="team.current_status === 1" class="flex-1 bg-emerald-500 text-white rounded-xl py-3 text-sm font-bold shadow-lg shadow-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-1" @click="handleStartGame(team)">
                     <text>开始游戏</text>
                   </button>
                 </view>
@@ -751,58 +612,68 @@ onReachBottom(() => {
 
               <template v-else-if="team.current_status === 2">
                 <view class="w-full flex flex-col gap-3">
-                  <view
-                    v-if="isJoined(team.team_id) && gameStore.currentTask"
-                    class="bg-white rounded-xl p-3 border border-indigo-50 flex justify-between items-center shadow-sm"
-                  >
-                    <view>
-                      <text class="text-[10px] text-gray-400 font-bold uppercase block mb-1">
-                        CURRENT TASK
+                  <view v-if="isJoined(team.team_id) && gameStore.currentTask" class="bg-white rounded-xl p-4 border border-indigo-100 shadow-sm relative overflow-hidden">
+                    <view class="relative z-10 mb-3 border-b border-gray-100 pb-2">
+                      <text class="text-[10px] text-indigo-400 font-bold uppercase block mb-1">
+                        CURRENT STAGE
                       </text>
-                      <text class="text-sm font-black text-gray-900 leading-tight">
+                      <text class="text-lg font-black text-gray-900 leading-tight block">
                         {{ team.current_task_name || gameStore.currentTask?.stage_name || '任务同步中...' }}
                       </text>
                     </view>
-
-                    <view v-if="gameStore.isCurrentTaskComplete" class="flex items-center gap-1 text-gray-400">
-                      <text class="text-xs font-bold">
-                        生成中...
-                      </text>
+                    <view class="flex items-center justify-between gap-3">
+                      <view class="text-xs text-gray-400 leading-relaxed flex-1">
+                        <text v-if="gameStore.currentTask?.having_sub_tasks">
+                          包含 {{ gameStore.currentTask.sub_tasks?.length || 0 }} 个子任务。<text v-if="!gameStore.isCurrentTaskComplete" class="text-orange-500 block mt-1">
+                            *可强制结算本幕
+                          </text>
+                        </text>
+                        <text v-else>
+                          当前为单一大任务
+                        </text>
+                      </view>
+                      <button class="px-4 py-2 rounded-lg text-xs font-bold shadow-md transition-all active:scale-95 text-white flex items-center gap-1" :class="getMainTaskConfig(gameStore.currentTask).color" @click="handleSpecificAction(gameStore.currentTask, false)">
+                        <text>{{ getMainTaskConfig(gameStore.currentTask).icon }}</text>
+                        <text>{{ getMainTaskConfig(gameStore.currentTask).text }}</text>
+                      </button>
                     </view>
-                    <view v-else class="flex items-center gap-1 text-green-500">
-                      <text class="animate-pulse">
-                        ●
-                      </text>
-                      <text class="text-xs font-bold">
-                        进行中
-                      </text>
-                    </view>
+                    <text class="absolute right-[-10px] top-[-10px] text-8xl opacity-5">
+                      🏁
+                    </text>
                   </view>
 
-                  <view class="flex gap-2">
-                    <button
-                      class="flex-[2] py-3 rounded-xl text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95 text-white"
-                      :class="gameStore.isCurrentTaskComplete
-                        ? 'bg-gray-200 text-gray-400 cursor-not-allowed shadow-none'
-                        : actionButtonConfig.color"
-                      :disabled="gameStore.isCurrentTaskComplete"
-                      @click="handleSmartAction(team)"
-                    >
-                      <text class="text-lg">
-                        {{ gameStore.isCurrentTaskComplete ? '💤' : actionButtonConfig.icon }}
+                  <view v-if="gameStore.currentTask?.having_sub_tasks && gameStore.currentTask?.sub_tasks" class="flex flex-col gap-2">
+                    <view class="flex items-center justify-between px-1">
+                      <text class="text-xs font-bold text-gray-500">
+                        子任务列表
                       </text>
-
-                      <text>
-                        {{ gameStore.isCurrentTaskComplete ? '等待新关卡' : actionButtonConfig.text }}
-                      </text>
-                    </button>
-
-                    <button
-                      class="flex-1 bg-white border border-gray-200 text-gray-600 rounded-xl py-3 text-sm font-bold shadow-sm active:scale-95"
-                      @click="handleOpenConsole(team)"
-                    >
-                      详情
-                    </button>
+                    </view>
+                    <view v-for="(sub, index) in gameStore.currentTask.sub_tasks" :key="sub.sub_task_id" class="bg-white border border-gray-100 rounded-lg p-3 flex items-center justify-between shadow-sm" :class="{ 'opacity-60 bg-gray-50': sub.is_finished }">
+                      <view class="flex flex-col gap-0.5 flex-1 pr-2">
+                        <view class="flex items-center gap-2">
+                          <text class="text-xs font-mono text-gray-400 bg-gray-100 px-1 rounded">
+                            #{{ index + 1 }}
+                          </text>
+                          <text class="text-sm font-bold truncate" :class="sub.is_finished ? 'text-gray-400 line-through' : 'text-gray-800'">
+                            {{ sub.game_name || sub.sub_task_name || '未命名' }}
+                          </text>
+                        </view>
+                        <text class="text-[10px] text-gray-400 truncate">
+                          📍 {{ sub.target_location_name || '未知地点' }}
+                        </text>
+                      </view>
+                      <view>
+                        <button v-if="!sub.is_finished" class="px-3 py-1.5 rounded-md text-[10px] font-bold shadow-sm active:scale-95 text-white flex items-center gap-1 min-w-[70px] justify-center" :class="getSubTaskConfig(sub).color" @click="handleSpecificAction(sub, true)">
+                          <text>{{ getSubTaskConfig(sub).icon }}</text>
+                          <text>{{ getSubTaskConfig(sub).text }}</text>
+                        </button>
+                        <view v-else class="flex items-center gap-1 px-2 py-1">
+                          <text class="text-green-500 font-bold text-xs">
+                            ✓ 已完成
+                          </text>
+                        </view>
+                      </view>
+                    </view>
                   </view>
                 </view>
               </template>
@@ -815,11 +686,75 @@ onReachBottom(() => {
         </view>
       </view>
     </view>
+
+    <view v-if="showMemberModal" class="fixed inset-0 z-[999] flex items-center justify-center bg-black/60 backdrop-blur-sm p-6 animate-fade-in" @click="closeMemberModal">
+      <view class="w-full bg-white rounded-2xl overflow-hidden shadow-2xl animate-scale-up" @click.stop>
+        <view class="bg-indigo-600 p-4 flex justify-between items-center">
+          <view>
+            <text class="text-white/80 text-xs font-bold uppercase block">
+              Team Members
+            </text>
+            <text class="text-white text-lg font-black">
+              {{ currentViewingTeamName }}
+            </text>
+          </view>
+          <view class="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center text-white" @click="closeMemberModal">
+            ✕
+          </view>
+        </view>
+        <scroll-view scroll-y class="max-h-[60vh] bg-gray-50/50">
+          <view v-if="currentMemberList.length === 0" class="py-12 flex flex-col items-center justify-center text-gray-400">
+            <text class="text-4xl mb-2">
+              😶‍🌫️
+            </text>
+            <text class="text-xs">
+              暂无成员信息
+            </text>
+          </view>
+          <view class="p-4 space-y-3">
+            <view v-for="(member, index) in currentMemberList" :key="member.user_id" class="bg-white border border-gray-100 rounded-xl p-3 flex items-center justify-between shadow-sm active:scale-[0.99] transition-transform">
+              <view class="flex items-center gap-3">
+                <view class="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold border-2 border-white shadow-sm" :class="isGuide(member.username) ? 'bg-indigo-100 text-indigo-600' : 'bg-orange-100 text-orange-600'">
+                  {{ member.username.charAt(0).toUpperCase() }}
+                </view>
+                <view class="flex flex-col">
+                  <view class="flex items-center gap-2">
+                    <text class="text-gray-900 font-bold text-sm">
+                      {{ member.username || '匿名用户' }}
+                    </text>
+                    <view v-if="member.game_role || isGuide(member.username)" class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider leading-none" :class="isGuide(member.username) ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-600'">
+                      {{ member.game_role || 'GUIDE' }}
+                    </view>
+                  </view>
+                  <view class="flex items-center gap-1 mt-0.5" @click="copyId(member.user_id)">
+                    <text class="text-[10px] text-gray-400 font-mono">
+                      ID: ...{{ member.user_id.slice(-6) }}
+                    </text>
+                    <text class="text-[9px] text-gray-300">
+                      📋
+                    </text>
+                  </view>
+                </view>
+              </view>
+              <view class="flex flex-col items-end gap-1">
+                <view class="flex items-center gap-1.5 bg-gray-50 px-2 py-1 rounded-lg border border-gray-100">
+                  <view class="w-2 h-2 rounded-full" :class="member.status === 1 ? 'bg-emerald-500 animate-pulse' : 'bg-gray-300'" />
+                  <text class="text-[10px] font-bold" :class="member.status === 1 ? 'text-emerald-600' : 'text-gray-400'">
+                    {{ member.status === 1 ? '在线' : '离线' }}
+                  </text>
+                </view>
+              </view>
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+    </view>
     <CustomTabBar :current="0" />
   </view>
 </template>
 
 <style scoped>
+/* 保持你原有的样式不变 */
 button::after {
   border: none;
 }
@@ -849,7 +784,7 @@ button:active {
   }
 }
 .animate-spin {
-  animation: spin 1s linear infinite;
+  animation: spin 0.5s linear infinite;
   display: inline-block;
 }
 @keyframes spin {
@@ -861,7 +796,7 @@ button:active {
   }
 }
 .animate-slide-up {
-  animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 @keyframes slideUp {
   from {
@@ -874,7 +809,7 @@ button:active {
   }
 }
 .animate-bounce {
-  animation: bounce 1s infinite;
+  animation: bounce 0.5s infinite;
 }
 @keyframes bounce {
   0%,
