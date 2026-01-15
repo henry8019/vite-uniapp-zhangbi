@@ -305,10 +305,10 @@ function getSubTaskConfig(subTask) {
   const mechanisms = subTask.task_complete_mechanisms || subTask.task_complete_mechanism || []
   const hasStaffConfirm = mechanisms.some(m => m.mechanism_name === 'STAFF_CONFIRM')
   if (hasStaffConfirm) {
-    return { text: '确认', color: 'bg-emerald-500 shadow-emerald-200', icon: '✅' }
+    return { text: '确认', color: 'bg-emerald-500 shadow-emerald-200', icon: '' }
   }
   else {
-    return { text: '跳过', color: 'bg-orange-500 shadow-orange-200', icon: '⏭️' }
+    return { text: '跳过', color: 'bg-orange-500 shadow-orange-200', icon: '' }
   }
 }
 
@@ -600,13 +600,28 @@ onReachBottom(() => {
 
             <template v-else>
               <template v-if="team.current_status === 0 || team.current_status === 1">
-                <view class="flex gap-30">
-                  <button class="flex-1 bg-indigo-600 text-white rounded-xl py-3 text-sm font-bold shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-1" :class="team.current_status === 1 ? 'bg-indigo-500' : 'bg-indigo-600'" @click="handleAssignScript(team)">
-                    <text>{{ team.current_status === 1 ? '分配剧本' : '分配剧本' }}</text>
-                  </button>
-                  <button v-if="team.current_status === 1" class="flex-1 bg-emerald-500 text-white rounded-xl py-3 text-sm font-bold shadow-lg shadow-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-1" @click="handleStartGame(team)">
-                    <text>开始游戏</text>
-                  </button>
+                <view class="flex items-center justify-center w-full px-6 py-4">
+                  <view class="flex w-full max-w-md gap-5 transition-all duration-300">
+                    <button
+                      class="flex-1 relative overflow-hidden rounded-full py-3 text-sm font-bold text-white shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 border-0"
+                      :class="[
+                        team.current_status === 1
+                          ? 'bg-gradient-to-r from-slate-500 to-slate-600 shadow-slate-500/30' // 次要状态颜色变暗一点
+                          : 'bg-gradient-to-r from-indigo-500 to-indigo-600 shadow-indigo-500/40',
+                      ]"
+                      @click="handleAssignScript(team)"
+                    >
+                      <text>{{ team.current_status === 1 ? '分配剧本' : '分配剧本' }}</text>
+                    </button>
+
+                    <button
+                      v-if="team.current_status === 1"
+                      class="flex-1 relative overflow-hidden bg-gradient-to-r from-emerald-400 to-emerald-600 text-white rounded-full py-3 text-sm font-bold shadow-lg shadow-emerald-500/40 active:scale-95 transition-all flex items-center justify-center gap-2 border-0"
+                      @click="handleStartGame(team)"
+                    >
+                      <text>开始游戏</text>
+                    </button>
+                  </view>
                 </view>
               </template>
 

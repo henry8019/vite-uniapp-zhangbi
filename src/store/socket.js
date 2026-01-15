@@ -19,10 +19,12 @@ export const useSocketStore = defineStore('socket', {
       if (this.socket?.connected)
         return
 
-      // TODO: 替换为真实服务器地址 (建议从 env 读取)
-      const url = '/'
+      // 根据环境变量动态设置 Socket 服务器地址
+      // 开发环境使用代理 '/'，生产环境使用完整的 HTTPS 地址
+      const baseUrl = import.meta.env.VITE_API_WS_URL || '/'
+      const url = import.meta.env.MODE === 'production' ? baseUrl : '/'
 
-      console.log('🚀 [Socket] 正在连接服务器...')
+      console.log('🚀 [Socket] 正在连接服务器...', url)
       this.socket = io(url, {
         path: '/socket.io',
         transports: ['websocket', 'polling'],
